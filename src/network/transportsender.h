@@ -38,6 +38,7 @@
 
 #include "src/crypto/prng.h"
 #include "src/network/network.h"
+#include "src/network/outofband.h"
 #include "src/protobufs/transportinstruction.pb.h"
 #include "transportfragment.h"
 #include "transportstate.h"
@@ -101,6 +102,8 @@ private:
 
   uint64_t last_heard; /* last time received new state */
 
+  OutOfBand oob_ctl; /* out of band protocol object */
+
   /* chaff to disguise instruction length */
   PRNG prng;
   const std::string make_chaff( void );
@@ -137,6 +140,9 @@ public:
       shutdown_in_progress = true;
     }
   }
+
+  /* Get reference to out of band control object */
+  OutOfBand* oob( void ) { return &oob_ctl; }
 
   /* Misc. getters and setters */
   /* Cannot modify current_state while shutdown in progress */

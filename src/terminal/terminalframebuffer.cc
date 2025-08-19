@@ -645,15 +645,16 @@ std::string Renditions::sgr( void ) const
     ret.append( col );
   }
   if ( underline_color ) {
+    ret.append( "m\033[" );
     if ( is_true_color( underline_color ) ) {
       snprintf( col,
                 sizeof( col ),
-                ";58:2::%d:%d:%d",
+                "58:2::%d:%d:%d",
                 ( underline_color >> 16 ) & 0xff,
                 ( underline_color >> 8 ) & 0xff,
                 underline_color & 0xff );
     } else {
-      snprintf( col, sizeof( col ), ";58:5:%d", underline_color );
+      snprintf( col, sizeof( col ), "58:5:%d", underline_color );
     }
     ret.append( col );
   }

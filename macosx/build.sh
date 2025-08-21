@@ -20,15 +20,6 @@
 
 set -e
 
-protobuf_LIBS=$(l=libprotobuf.a; for i in /opt/local/lib /usr/local/lib; do  if [ -f $i/$l ]; then echo $i/$l; fi; done)
-if [ -z "$protobuf_LIBS" ]; then echo "Can't find libprotobuf.a"; exit 1; fi
-export protobuf_LIBS
-if ! pkg-config --cflags protobuf > /dev/null 2>&1; then
-    protobuf_CFLAGS=-I$(for i in /opt /usr; do d=$i/local/include; if [ -d $d/google/protobuf ]; then echo $d; fi; done)
-    if [ "$protobuf_CFLAGS" = "-I" ]; then echo "Can't find protobuf includes"; exit 1; fi
-    export protobuf_CFLAGS
-fi
-
 echo "Building into prefix..."
 
 
@@ -39,7 +30,7 @@ echo "Building into prefix..."
 #
 PREFIX="$(pwd)/prefix"
 
-HOST="x86_64-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
+HOST="arm64-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
 ARCH_TRIPLES="x86_64-apple-macosx arm64-apple-macos"
 
 pushd .. > /dev/null
@@ -47,7 +38,7 @@ pushd .. > /dev/null
 if [ ! -f configure ];
 then
     echo "Running autogen."
-    PATH=/opt/local/bin:$PATH ./autogen.sh
+    PATH=/opt/homebrew/bin:$PATH ./autogen.sh
 fi
 
 #
@@ -122,7 +113,7 @@ if which -s pkgbuild; then
     mkdir -p Resources/en.lproj
     cp -p copying.rtf Resources/en.lproj/License
     cp -p readme.rtf Resources/en.lproj/Readme
-    pkgbuild --root "$PREFIX" --identifier $PKGID $PKGID
+    pkgbuild --root "$PREFIX" --version "${PACKAGE_VERSION}" --identifier $PKGID $PKGID
     productbuild --distribution Distribution \
 		 --resources Resources \
 		 --package-path . \

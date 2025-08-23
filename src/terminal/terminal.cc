@@ -134,8 +134,26 @@ void Emulator::print( const Parser::Print* act )
       }
       if ( !combining_cell->full() ) {
         combining_cell->append( ch );
-        if ( ch == 0xFE0F ) {
+        // VS16 causes the previous codepoint to be rendered as its emoji representation
+        // which could cause it to change from 1 to 2 characters wide
+        if ( ch == 0xFE0F && !combining_cell->get_wide() ) {
+          // have to move this emoji to the next line
+          if ( fb.ds.auto_wrap_mode && fb.ds.next_print_will_wrap ) {
+            fb.get_mutable_row( -1 )->set_wrap( false );
+            fb.ds.move_col( 0 );
+            fb.move_rows_autoscroll( 1 );
+            *fb.get_mutable_cell() = *combining_cell;
+            fb.reset_cell( combining_cell );
+            fb.ds.move_col( 1, true, true );
+            combining_cell = fb.get_combining_cell();
+          }
           combining_cell->set_wide( true );
+          if ( fb.ds.insert_mode ) {
+            fb.insert_cell( fb.ds.get_cursor_row(), fb.ds.get_cursor_col() );
+          } else if ( fb.ds.get_cursor_col() < fb.ds.get_width() ) {
+            fb.reset_cell( fb.get_mutable_cell() );
+          }
+          fb.ds.move_col( 1, true, true );
         }
       }
     } break;

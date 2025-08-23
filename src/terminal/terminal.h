@@ -74,6 +74,8 @@ private:
   void OSC_end( const Parser::OSC_End* act );
   void resize( size_t s_width, size_t s_height );
 
+  bool try_combine(wchar_t ch, int chwidth);
+
 public:
   Emulator( size_t s_width, size_t s_height );
 

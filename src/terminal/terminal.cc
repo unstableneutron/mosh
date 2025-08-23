@@ -33,7 +33,6 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
-#include <typeinfo>
 
 #include <unistd.h>
 
@@ -56,6 +55,69 @@ void Emulator::execute( const Parser::Execute* act )
   dispatch.dispatch( CONTROL, act, &fb );
 }
 
+bool Emulator::try_combine( wchar_t ch, int chwidth )
+{
+  bool zero_width = chwidth == 0;
+  bool force_wide = ch == 0xFE0F; // VS16
+
+  Cell* combining_cell = fb.get_combining_cell();
+  if ( !combining_cell ) {
+    return zero_width;
+  }
+
+  if ( !zero_width ) {
+    // TODO: check Hangul Jamo state here
+    if ( is_unicode_modifier( ch ) ) {
+      if ( combining_cell->size() < 2 ) {
+        return false;
+      }
+      force_wide = true;
+    } else if ( combining_cell->size() < 3
+                || combining_cell->get_contents().rfind( "\342\200\215" ) == std::string::npos ) {
+      return false;
+    }
+  }
+
+  if ( combining_cell->empty() ) {
+    /* cell starts with combining character */
+    /* ... but isn't necessarily the target for a new
+       base character [e.g. start of line], if the
+       combining character has been cleared with
+       a sequence like ED ("J") or EL ("K") */
+    assert( !combining_cell->get_wide() );
+    combining_cell->set_fallback( true );
+    fb.ds.move_col( 1, true, true );
+  }
+
+  if ( !combining_cell->full() ) {
+    combining_cell->append( ch );
+
+    if ( force_wide && !combining_cell->get_wide() ) {
+      // have to move this emoji to the next line
+      if ( fb.ds.auto_wrap_mode && fb.ds.next_print_will_wrap ) {
+        fb.get_mutable_row( -1 )->set_wrap( false );
+        fb.ds.move_col( 0 );
+        fb.move_rows_autoscroll( 1 );
+        *fb.get_mutable_cell() = *combining_cell;
+        fb.reset_cell( combining_cell );
+        fb.ds.move_col( 1, true, true );
+        combining_cell = fb.get_combining_cell();
+      }
+      combining_cell->set_wide( true );
+      if ( fb.ds.insert_mode ) {
+        fb.insert_cell( fb.ds.get_cursor_row(), fb.ds.get_cursor_col() );
+      } else if ( fb.ds.get_cursor_col() < fb.ds.get_width() ) {
+        fb.reset_cell( fb.get_mutable_cell() );
+      }
+      fb.get_mutable_cell()->set_wide_padding( true );
+      fb.ds.move_col( 1, true, true );
+    }
+    return true;
+  }
+
+  return false;
+}
+
 void Emulator::print( const Parser::Print* act )
 {
   assert( act->char_present );
@@ -67,6 +129,11 @@ void Emulator::print( const Parser::Print* act )
    * some common narrow characters.
    */
   const int chwidth = ch == L'\0' ? -1 : ( Cell::isprint_iso8859_1( ch ) ? 1 : mosh_wcwidth( ch ) );
+
+  // attempt to combine with previous cell if necessary
+  if ( !Cell::isprint_iso8859_1( ch ) && try_combine( ch, chwidth ) ) {
+    return;
+  }
 
   Cell* this_cell = fb.get_mutable_cell();
 
@@ -109,54 +176,17 @@ void Emulator::print( const Parser::Print* act )
       fb.apply_renditions_to_cell( this_cell );
 
       if ( chwidth == 2 && fb.ds.get_cursor_col() + 1 < fb.ds.get_width() ) { /* erase overlapped cell */
-        fb.reset_cell( fb.get_mutable_cell( fb.ds.get_cursor_row(), fb.ds.get_cursor_col() + 1 ) );
+        Cell* overlapped = fb.get_mutable_cell( fb.ds.get_cursor_row(), fb.ds.get_cursor_col() + 1 );
+        fb.reset_cell( overlapped );
+        overlapped->set_wide_padding( true );
       }
 
       fb.ds.move_col( chwidth, true, true );
 
       break;
     case 0: /* combining character */
-    {
-      Cell* combining_cell = fb.get_combining_cell(); /* can be null if we were resized */
-      if ( combining_cell == NULL ) {                 /* character is now offscreen */
-        break;
-      }
-
-      if ( combining_cell->empty() ) {
-        /* cell starts with combining character */
-        /* ... but isn't necessarily the target for a new
-           base character [e.g. start of line], if the
-           combining character has been cleared with
-           a sequence like ED ("J") or EL ("K") */
-        assert( !combining_cell->get_wide() );
-        combining_cell->set_fallback( true );
-        fb.ds.move_col( 1, true, true );
-      }
-      if ( !combining_cell->full() ) {
-        combining_cell->append( ch );
-        // VS16 causes the previous codepoint to be rendered as its emoji representation
-        // which could cause it to change from 1 to 2 characters wide
-        if ( ch == 0xFE0F && !combining_cell->get_wide() ) {
-          // have to move this emoji to the next line
-          if ( fb.ds.auto_wrap_mode && fb.ds.next_print_will_wrap ) {
-            fb.get_mutable_row( -1 )->set_wrap( false );
-            fb.ds.move_col( 0 );
-            fb.move_rows_autoscroll( 1 );
-            *fb.get_mutable_cell() = *combining_cell;
-            fb.reset_cell( combining_cell );
-            fb.ds.move_col( 1, true, true );
-            combining_cell = fb.get_combining_cell();
-          }
-          combining_cell->set_wide( true );
-          if ( fb.ds.insert_mode ) {
-            fb.insert_cell( fb.ds.get_cursor_row(), fb.ds.get_cursor_col() );
-          } else if ( fb.ds.get_cursor_col() < fb.ds.get_width() ) {
-            fb.reset_cell( fb.get_mutable_cell() );
-          }
-          fb.ds.move_col( 1, true, true );
-        }
-      }
-    } break;
+      // handled above
+      break;
     case -1: /* unprintable character */
       break;
     default:

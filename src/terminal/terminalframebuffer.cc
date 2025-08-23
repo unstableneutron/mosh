@@ -39,7 +39,8 @@
 using namespace Terminal;
 
 Cell::Cell( color_type background_color )
-  : contents(), renditions( background_color ), wide( false ), fallback( false ), wrap( false )
+  : contents(), renditions( background_color ), wide( false ), fallback( false ), wrap( false ),
+    wide_padding( false )
 {}
 
 void Cell::reset( color_type background_color )
@@ -49,6 +50,7 @@ void Cell::reset( color_type background_color )
   wide = false;
   fallback = false;
   wrap = false;
+  wide_padding = false;
 }
 
 void DrawState::reinitialize_tabs( unsigned int start )
@@ -60,9 +62,8 @@ void DrawState::reinitialize_tabs( unsigned int start )
 }
 
 DrawState::DrawState( int s_width, int s_height )
-  : width( s_width ), height( s_height ), cursor_col( 0 ), cursor_row( 0 ), combining_char_col( 0 ),
-    combining_char_row( 0 ), default_tabs( true ), tabs( s_width ), scrolling_region_top_row( 0 ),
-    scrolling_region_bottom_row( height - 1 ), renditions( 0 ), save(),
+  : width( s_width ), height( s_height ), cursor_col( 0 ), cursor_row( 0 ), default_tabs( true ), tabs( s_width ),
+    scrolling_region_top_row( 0 ), scrolling_region_bottom_row( height - 1 ), renditions( 0 ), save(),
     cursor_style( Terminal::CursorStyle::BLINKING_BLOCK ), next_print_will_wrap( false ), origin_mode( false ),
     auto_wrap_mode( true ), insert_mode( false ), cursor_visible( true ), reverse_video( false ),
     bracketed_paste( false ), mouse_reporting_mode( MOUSE_REPORTING_NONE ), mouse_focus_event( false ),
@@ -115,8 +116,6 @@ void Framebuffer::scroll( int N )
 
 void DrawState::new_grapheme( void )
 {
-  combining_char_col = cursor_col;
-  combining_char_row = cursor_row;
 }
 
 void DrawState::snap_cursor_to_border( void )
@@ -191,13 +190,23 @@ void Framebuffer::move_rows_autoscroll( int rows )
 
 Cell* Framebuffer::get_combining_cell( void )
 {
-  if ( ( ds.get_combining_char_col() < 0 ) || ( ds.get_combining_char_row() < 0 )
-       || ( ds.get_combining_char_col() >= ds.get_width() )
-       || ( ds.get_combining_char_row() >= ds.get_height() ) ) {
+  int cursor_x = ds.get_cursor_col();
+  if ( cursor_x < 1 ) {
     return NULL;
-  } /* can happen if a resize came in between */
+  }
 
-  return get_mutable_cell( ds.get_combining_char_row(), ds.get_combining_char_col() );
+  int n = 1;
+  Cell* last = get_mutable_cell( -1, cursor_x - n );
+  if ( cursor_x != 1 && ( last->get_wide_padding() ) ) {
+    n = 2;
+    last = get_mutable_cell( -1, cursor_x - n );
+  }
+
+  if ( last && ( last->get_width() != n || last->get_wide_padding() ) ) {
+    return NULL;
+  }
+
+  return last;
 }
 
 void DrawState::set_tab( void )
@@ -441,11 +450,6 @@ void DrawState::resize( int s_width, int s_height )
   snap_cursor_to_border();
 
   /* saved cursor will be snapped to border on restore */
-
-  /* invalidate combining char cell if necessary */
-  if ( ( combining_char_col >= width ) || ( combining_char_row >= height ) ) {
-    combining_char_col = combining_char_row = -1;
-  }
 }
 
 Renditions::Renditions( color_type s_background )
@@ -748,6 +752,11 @@ bool Cell::compare( const Cell& other ) const
     ret = true;
     // See comment above about bit-field promotion; it applies here as well.
     fprintf( stderr, "wrap: %d vs. %d\n", wrap, other.wrap );
+  }
+
+  if ( wide_padding != other.wide_padding ) {
+    ret = true;
+    fprintf( stderr, "wide_padding: %d vs. %d\n", wide_padding, other.wide_padding );
   }
 
   return ret;

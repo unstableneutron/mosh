@@ -124,6 +124,7 @@ private:
   unsigned int wide : 1;     /* 0 = narrow, 1 = wide */
   unsigned int fallback : 1; /* first character is combining character */
   unsigned int wrap : 1;
+  unsigned int wide_padding : 1;
 
 private:
   Cell();
@@ -136,7 +137,7 @@ public:
   bool operator==( const Cell& x ) const
   {
     return ( ( contents == x.contents ) && ( fallback == x.fallback ) && ( wide == x.wide )
-             && ( renditions == x.renditions ) && ( wrap == x.wrap ) );
+             && ( renditions == x.renditions ) && ( wrap == x.wrap ) && ( wide_padding == x.wide_padding ) );
   }
 
   bool operator!=( const Cell& x ) const { return !operator==( x ); }
@@ -144,10 +145,12 @@ public:
   /* Accessors for contents field */
   std::string debug_contents( void ) const;
 
+  std::string const& get_contents() const { return contents; }
   bool empty( void ) const { return contents.empty(); }
   /* 32 seems like a reasonable limit on combining characters */
   bool full( void ) const { return contents.size() >= 32; }
   void clear( void ) { contents.clear(); }
+  std::size_t size() const { return contents.size(); }
 
   bool is_blank( void ) const
   {
@@ -220,6 +223,8 @@ public:
   void set_renditions( const Renditions& r ) { renditions = r; }
   bool get_wide( void ) const { return wide; }
   void set_wide( bool w ) { wide = w; }
+  bool get_wide_padding( void ) const { return wide_padding; }
+  void set_wide_padding( bool w ) { wide_padding = w; }
   unsigned int get_width( void ) const { return wide + 1; }
   bool get_fallback( void ) const { return fallback; }
   void set_fallback( bool f ) { fallback = f; }
@@ -278,7 +283,6 @@ private:
   void snap_cursor_to_border( void );
 
   int cursor_col, cursor_row;
-  int combining_char_col, combining_char_row;
 
   bool default_tabs;
   std::vector<bool> tabs;
@@ -332,8 +336,6 @@ public:
 
   int get_cursor_col( void ) const { return cursor_col; }
   int get_cursor_row( void ) const { return cursor_row; }
-  int get_combining_char_col( void ) const { return combining_char_col; }
-  int get_combining_char_row( void ) const { return combining_char_row; }
   int get_width( void ) const { return width; }
   int get_height( void ) const { return height; }
 

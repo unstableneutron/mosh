@@ -2,18 +2,43 @@
 #define CHAR_UTILS_HPP
 
 #include "widechar_width.h"
-#include <algorithm>
-#include <array>
 
 static int mosh_wcwidth( uint32_t c )
 {
-  static constexpr auto force_wide
-    = std::array { 0x1F1E6, 0x1F1E7, 0x1F1E8, 0x1F1E9, 0x1F1EA, 0x1F1EB, 0x1F1EC, 0x1F1ED, 0x1F1EE,
-                   0x1F1EF, 0x1F1F0, 0x1F1F1, 0x1F1F2, 0x1F1F3, 0x1F1F4, 0x1F1F5, 0x1F1F6, 0x1F1F7,
-                   0x1F1F8, 0x1F1F9, 0x1F1FA, 0x1F1FB, 0x1F1FC, 0x1F1FD, 0x1F1FE, 0x1F1FF };
+  // ZWJ is a combining character
+  if ( c == 0x0200D ) {
+    return 0;
+  }
 
-  if ( std::binary_search( std::begin( force_wide ), std::end( force_wide ), c ) ) {
-    return 2;
+  // regional indicators are wide
+  switch ( c ) {
+    case 0x1F1E6:
+    case 0x1F1E7:
+    case 0x1F1E8:
+    case 0x1F1E9:
+    case 0x1F1EA:
+    case 0x1F1EB:
+    case 0x1F1EC:
+    case 0x1F1ED:
+    case 0x1F1EE:
+    case 0x1F1EF:
+    case 0x1F1F0:
+    case 0x1F1F1:
+    case 0x1F1F2:
+    case 0x1F1F3:
+    case 0x1F1F4:
+    case 0x1F1F5:
+    case 0x1F1F6:
+    case 0x1F1F7:
+    case 0x1F1F8:
+    case 0x1F1F9:
+    case 0x1F1FA:
+    case 0x1F1FB:
+    case 0x1F1FC:
+    case 0x1F1FD:
+    case 0x1F1FE:
+    case 0x1F1FF:
+      return 2;
   }
 
   int width = widechar_wcwidth( c );
@@ -40,6 +65,45 @@ static int mosh_wcwidth( uint32_t c )
     default:
       return -1;
   }
+}
+
+static bool is_unicode_modifier( wchar_t ch )
+{
+  switch ( ch ) {
+    case 0x1F1E6:
+    case 0x1F1E7:
+    case 0x1F1E8:
+    case 0x1F1E9:
+    case 0x1F1EA:
+    case 0x1F1EB:
+    case 0x1F1EC:
+    case 0x1F1ED:
+    case 0x1F1EE:
+    case 0x1F1EF:
+    case 0x1F1F0:
+    case 0x1F1F1:
+    case 0x1F1F2:
+    case 0x1F1F3:
+    case 0x1F1F4:
+    case 0x1F1F5:
+    case 0x1F1F6:
+    case 0x1F1F7:
+    case 0x1F1F8:
+    case 0x1F1F9:
+    case 0x1F1FA:
+    case 0x1F1FB:
+    case 0x1F1FC:
+    case 0x1F1FD:
+    case 0x1F1FE:
+    case 0x1F1FF:
+    case 0x1F3FB:
+    case 0x1F3FC:
+    case 0x1F3FD:
+    case 0x1F3FE:
+    case 0x1F3FF:
+      return true;
+  }
+  return false;
 }
 
 #endif

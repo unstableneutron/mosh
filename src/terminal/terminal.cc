@@ -57,7 +57,7 @@ void Emulator::execute( const Parser::Execute* act )
 
 bool Emulator::try_combine( wchar_t ch, int chwidth )
 {
-  bool zero_width = chwidth == 0;
+  bool zero_width = chwidth == 0 || is_unicode_zwj( ch );
   bool force_wide = ch == 0xFE0F; // VS16
   static constexpr std::string_view zwj = "\u200D";
 
@@ -128,9 +128,13 @@ void Emulator::print( const Parser::Print* act )
 
   /*
    * Check for printing ISO 8859-1 first, it's a cheap way to detect
-   * some common narrow characters.
+   * some common narrow characters. Otherwise, check for unicode width overrides that
+   * wcwidth doesn't report as a width of 2 but should be treated that way anyway
    */
-  const int chwidth = ch == L'\0' ? -1 : ( Cell::isprint_iso8859_1( ch ) ? 1 : mosh_wcwidth( ch ) );
+  const int chwidth = ch == L'\0'                      ? -1
+                      : Cell::isprint_iso8859_1( ch )  ? 1
+                      : is_unicode_wide_override( ch ) ? 2
+                                                       : mosh_wcwidth( ch );
 
   // attempt to combine with previous cell if necessary
   if ( !Cell::isprint_iso8859_1( ch ) && try_combine( ch, chwidth ) ) {

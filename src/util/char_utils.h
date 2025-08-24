@@ -5,11 +5,40 @@
 
 static int mosh_wcwidth( uint32_t c )
 {
-  // ZWJ is a combining character
-  if ( c == 0x0200D ) {
-    return 0;
+  int width = widechar_wcwidth( c );
+  if ( width >= 0 ) {
+    return width;
   }
 
+  /* https://github.com/ridiculousfish/widecharwidth/tree/master#c-usage */
+  switch ( width ) {
+    case widechar_nonprint:
+      return -1;
+    case widechar_combining:
+      return 0;
+    case widechar_ambiguous:
+      return 1;
+    case widechar_private_use:
+      return 1;
+    case widechar_unassigned:
+      return 1;
+    case widechar_non_character:
+      return -1;
+    case widechar_widened_in_9:
+      return 2;
+    default:
+      return -1;
+  }
+}
+
+static bool is_unicode_zwj( uint32_t c )
+{
+  // ZWJ is a combining character
+  return c == 0x0200D;
+}
+
+static bool is_unicode_wide_override( uint32_t c )
+{
   // regional indicators are wide
   switch ( c ) {
     case 0x1F1E6:
@@ -38,33 +67,9 @@ static int mosh_wcwidth( uint32_t c )
     case 0x1F1FD:
     case 0x1F1FE:
     case 0x1F1FF:
-      return 2;
+      return true;
   }
-
-  int width = widechar_wcwidth( c );
-  if ( width >= 0 ) {
-    return width;
-  }
-
-  /* https://github.com/ridiculousfish/widecharwidth/tree/master#c-usage */
-  switch ( width ) {
-    case widechar_nonprint:
-      return -1;
-    case widechar_combining:
-      return 0;
-    case widechar_ambiguous:
-      return 1;
-    case widechar_private_use:
-      return 1;
-    case widechar_unassigned:
-      return 1;
-    case widechar_non_character:
-      return -1;
-    case widechar_widened_in_9:
-      return 2;
-    default:
-      return -1;
-  }
+  return false;
 }
 
 static bool is_unicode_modifier( wchar_t ch )

@@ -59,6 +59,7 @@ bool Emulator::try_combine( wchar_t ch, int chwidth )
 {
   bool zero_width = chwidth == 0;
   bool force_wide = ch == 0xFE0F; // VS16
+  static constexpr std::string_view zwj = "\u200D";
 
   Cell* combining_cell = fb.get_combining_cell();
   if ( !combining_cell ) {
@@ -73,7 +74,8 @@ bool Emulator::try_combine( wchar_t ch, int chwidth )
       }
       force_wide = true;
     } else if ( combining_cell->size() < 3
-                || combining_cell->get_contents().rfind( "\342\200\215" ) == std::string::npos ) {
+                || combining_cell->get_contents().compare(
+                  combining_cell->size() - zwj.size(), zwj.size(), zwj ) ) {
       return false;
     }
   }

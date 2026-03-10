@@ -40,6 +40,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 /* Terminal framebuffer */
@@ -115,12 +116,36 @@ public:
   void clear_attributes() { attributes = 0; }
 };
 
+class Hyperlink
+{
+public:
+  Hyperlink( std::string p, std::string u ) : params( std::move( p ) ), url( std::move( u ) ) {}
+
+  std::string osc8() const;
+
+  bool empty() const { return url.empty(); }
+
+  bool operator==( const Hyperlink& x ) const { return params == x.params && url == x.url; }
+
+  bool operator!=( const Hyperlink& x ) const { return !operator==( x ); }
+
+  // Creates a potentially shared empty hyperlink.
+  static std::shared_ptr<const Hyperlink> make_empty();
+
+private:
+  Hyperlink() : params(), url() {}
+
+  std::string params;
+  std::string url;
+};
+
 class Cell
 {
 private:
   typedef std::string content_type; /* can be std::string, std::vector<uint8_t>, or __gnu_cxx::__vstring */
   content_type contents;
   Renditions renditions;
+  std::shared_ptr<const Hyperlink> hyperlink;
   unsigned int wide : 1;     /* 0 = narrow, 1 = wide */
   unsigned int fallback : 1; /* first character is combining character */
   unsigned int wrap : 1;
@@ -137,7 +162,8 @@ public:
   bool operator==( const Cell& x ) const
   {
     return ( ( contents == x.contents ) && ( fallback == x.fallback ) && ( wide == x.wide )
-             && ( renditions == x.renditions ) && ( wrap == x.wrap ) && ( wide_padding == x.wide_padding ) );
+             && ( renditions == x.renditions ) && ( *hyperlink == *x.hyperlink ) && ( wrap == x.wrap )
+             && ( wide_padding == x.wide_padding ) );
   }
 
   bool operator!=( const Cell& x ) const { return !operator==( x ); }
@@ -218,6 +244,8 @@ public:
   }
 
   /* Other accessors */
+  std::shared_ptr<const Hyperlink> get_hyperlink() const { return hyperlink; }
+  void set_hyperlink( std::shared_ptr<const Hyperlink> l ) { hyperlink = std::move( l ); }
   const Renditions& get_renditions( void ) const { return renditions; }
   Renditions& get_renditions( void ) { return renditions; }
   void set_renditions( const Renditions& r ) { renditions = r; }
@@ -292,6 +320,7 @@ private:
   int scrolling_region_top_row, scrolling_region_bottom_row;
 
   Renditions renditions;
+  std::shared_ptr<const Hyperlink> hyperlink;
 
   SavedCursor save;
 
@@ -353,6 +382,9 @@ public:
   int limit_top( void ) const;
   int limit_bottom( void ) const;
 
+  std::shared_ptr<const Hyperlink> get_hyperlink() const { return hyperlink; }
+  void set_hyperlink( std::shared_ptr<const Hyperlink> x ) { hyperlink = std::move( x ); }
+
   void set_foreground_color( int x ) { renditions.set_foreground_color( x ); }
   void set_background_color( int x ) { renditions.set_background_color( x ); }
   void set_underline_color( int x ) { renditions.set_underline_color( x ); }
@@ -378,7 +410,7 @@ public:
            && ( cursor_style == x.cursor_style ) && ( bracketed_paste == x.bracketed_paste )
            && ( mouse_reporting_mode == x.mouse_reporting_mode ) && ( mouse_focus_event == x.mouse_focus_event )
            && ( mouse_alternate_scroll == x.mouse_alternate_scroll )
-           && ( mouse_encoding_mode == x.mouse_encoding_mode );
+           && ( mouse_encoding_mode == x.mouse_encoding_mode ) && hyperlink == x.hyperlink;
   }
 };
 
@@ -451,8 +483,9 @@ public:
     if ( row == -1 )
       row = ds.get_cursor_row();
     row_pointer& mutable_row = rows.at( row );
-    // If the row is shared, copy it.
-    if ( !mutable_row.unique() ) {
+    // If the row is shared, copy it. This is only safe because mosh isn't
+    // multi-threaded.
+    if ( mutable_row.use_count() > 1 ) {
       mutable_row = std::make_shared<Row>( *mutable_row );
     }
     return mutable_row.get();
@@ -471,6 +504,7 @@ public:
   Cell* get_combining_cell( void );
 
   void apply_renditions_to_cell( Cell* cell );
+  void apply_hyperlink_to_cell( Cell* cell );
 
   void insert_line( int before_row, int count );
   void delete_line( int row, int count );

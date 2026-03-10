@@ -33,8 +33,9 @@
 #include "src/include/config.h"
 #include "src/include/version.h"
 
+#include <cerrno>
 #include <cstdlib>
-
+#include <cstring>
 #include <unistd.h>
 
 #include "src/crypto/crypto.h"
@@ -85,7 +86,7 @@ static void print_usage( FILE* file, const char* argv0 )
 {
   print_version( file );
   fprintf( file,
-           "\nUsage: %s [-# 'ARGS'] [-A] IP PORT\n"
+           "\nUsage: %s [-# 'ARGS'] [-A] IP PORT [PIPE-FD]\n"
            "       %s -c\n",
            argv0,
            argv0 );
@@ -111,7 +112,9 @@ int mosh_main( int argc, char* argv[] )
 int main( int argc, char* argv[] )
 #endif
 {
+  char *key_fd = NULL;
   unsigned int verbose = 0;
+
   /* For security, make sure we don't dump core */
   Crypto::disable_dumping_core();
 
@@ -157,13 +160,17 @@ int main( int argc, char* argv[] )
 
   char *ip, *desired_port;
 
-  if ( argc - optind != 2 ) {
+  int argcount = argc - optind;
+  if ( argcount < 2 || argcount > 3 ) {
     print_usage( stderr, argv[0] );
     exit( 1 );
   }
 
   ip = argv[optind];
   desired_port = argv[optind + 1];
+  if ( argcount == 3 ) {
+    key_fd = argv[optind + 2];
+  }
 
   /* Sanity-check arguments */
   if ( desired_port && ( strspn( desired_port, "0123456789" ) != strlen( desired_port ) ) ) {
@@ -172,11 +179,50 @@ int main( int argc, char* argv[] )
     exit( 1 );
   }
 
-  /* Read key from environment */
   char* env_key = getenv( "MOSH_KEY" );
-  if ( env_key == NULL ) {
-    fputs( "MOSH_KEY environment variable not found.\n", stderr );
-    exit( 1 );
+  std::string key;
+  if ( key_fd ) {
+    /* Read variables from a file descriptor, for forward compatibility.  But
+       only extract MOSH_KEY for now. */
+    char *endptr;
+    int key_fd_int = strtol( key_fd, &endptr, 0 );
+    if ( *endptr != '\0' ) {
+      fprintf( stderr, "Invalid argument for Key file descriptor.\n" );
+      exit( 1 );
+    }
+    FILE *key_file = fdopen( key_fd_int, "r" );
+    if ( !key_file ) {
+      fprintf( stderr, "Key file descriptor specified with -f not usable: %s.\n", strerror(errno) );
+      exit( 1 );
+    }
+    char buf[80];
+    while ( NULL != fgets( buf, sizeof buf, key_file ) ) {
+      /* Look for MOSH_KEY */
+      char *bp = buf;
+      strsep( &bp, "=" );
+      if ( NULL == bp || strcmp( "MOSH_KEY", buf ) != 0 ) continue;
+      size_t key_len = strcspn( bp, " \t\r\n" );
+      key.assign( bp, key_len );
+    }
+    if ( key.empty() ) {
+      fputs( "No key read from key file descriptor\n", stderr );
+      exit( 1 );
+    }
+    fclose( key_file );
+  } else {
+    /* Get key from environment */
+    if ( env_key == NULL ) {
+      fputs( "MOSH_KEY environment variable not found.\n", stderr );
+      exit( 1 );
+    }
+    key = env_key;
+  }
+  if ( env_key ) {
+    if ( unsetenv( "MOSH_KEY" ) < 0 ) {
+      perror( "unsetenv" );
+      exit( 1 );
+    }
+    env_key = NULL;
   }
 
   /* Read prediction preference */
@@ -186,13 +232,6 @@ int main( int argc, char* argv[] )
   /* Read prediction insertion preference */
   char* predict_overwrite = getenv( "MOSH_PREDICTION_OVERWRITE" );
   /* can be NULL */
-
-  std::string key( env_key );
-
-  if ( unsetenv( "MOSH_KEY" ) < 0 ) {
-    perror( "unsetenv" );
-    exit( 1 );
-  }
 
   /* Adopt native locale */
   set_native_locale();

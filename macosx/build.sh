@@ -26,10 +26,12 @@
 
 set -e
 
+DEPENDENCY_PREFIX=""
+
 toolchain_family()
 {
     case "$1" in
-        /opt/homebrew/*)
+        /opt/homebrew/*|/usr/local/*)
             echo "homebrew"
             ;;
         /opt/zerobrew/*)
@@ -48,10 +50,20 @@ force_dependency_toolchain()
 {
     case "${MOSH_DEP_TOOLCHAIN:-auto}" in
         auto)
+            DEPENDENCY_PREFIX=""
             return 0
             ;;
         homebrew)
-            dep_prefix="/opt/homebrew"
+            dep_prefix="${MOSH_HOMEBREW_PREFIX:-}"
+            if [ -z "$dep_prefix" ] && which -s brew; then
+                dep_prefix=$(brew --prefix 2> /dev/null || true)
+            fi
+            if [ -z "$dep_prefix" ] && [ -d /opt/homebrew ]; then
+                dep_prefix=/opt/homebrew
+            fi
+            if [ -z "$dep_prefix" ] && [ -d /usr/local ]; then
+                dep_prefix=/usr/local
+            fi
             ;;
         zerobrew)
             dep_prefix="/opt/zerobrew/prefix"
@@ -67,6 +79,7 @@ force_dependency_toolchain()
         return 1
     fi
 
+    DEPENDENCY_PREFIX="$dep_prefix"
     export PATH="${dep_prefix}/bin:$PATH"
     unset CPATH
     unset C_INCLUDE_PATH
@@ -110,6 +123,18 @@ list_non_system_dylibs()
         if ! is_system_dylib "$dep"; then
             echo "$dep"
         fi
+    done
+}
+
+list_unresolved_special_dylibs()
+{
+    otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
+    do
+        case "$dep" in
+            @rpath/*)
+                echo "$dep"
+                ;;
+        esac
     done
 }
 
@@ -250,9 +275,13 @@ bundle_non_system_dylibs()
 
     for target in "${scan_targets[@]}"; do
         [ -f "$target" ] || continue
-        deps=$(list_non_system_dylibs "$target" || true)
-        if [ -n "$deps" ]; then
-            unresolved+="$(printf '\n%s:\n%s' "$target" "$deps")"
+        deps_abs=$(list_non_system_dylibs "$target" || true)
+        if [ -n "$deps_abs" ]; then
+            unresolved+="$(printf '\n%s:\n%s' "$target" "$deps_abs")"
+        fi
+        deps_special=$(list_unresolved_special_dylibs "$target" || true)
+        if [ -n "$deps_special" ]; then
+            unresolved+="$(printf '\n%s:\n%s' "$target" "$deps_special")"
         fi
     done
 
@@ -282,7 +311,11 @@ pushd .. > /dev/null
 if [ ! -f configure ];
 then
     echo "Running autogen."
-    PATH=/opt/homebrew/bin:$PATH ./autogen.sh
+    if [ -n "$DEPENDENCY_PREFIX" ]; then
+        PATH="${DEPENDENCY_PREFIX}/bin:$PATH" ./autogen.sh
+    else
+        ./autogen.sh
+    fi
 fi
 
 PROTOC_BIN=$(resolve_protoc)

@@ -17,8 +17,252 @@
 # effect of disabling Homebrew's overzealous processor optimization
 # with (effectively) `-march=native`.
 #
+#
+# Modern Homebrew protobuf/abseil builds are dynamic-only, so static
+# linking is not generally available. This script now vendors non-system
+# dylibs into the package prefix and rewrites load paths to keep the
+# resulting package portable across Apple Silicon machines.
+#
 
 set -e
+
+toolchain_family()
+{
+    case "$1" in
+        /opt/homebrew/*)
+            echo "homebrew"
+            ;;
+        /opt/zerobrew/*)
+            echo "zerobrew"
+            ;;
+        /opt/local/*)
+            echo "macports"
+            ;;
+        *)
+            echo "other"
+            ;;
+    esac
+}
+
+force_dependency_toolchain()
+{
+    case "${MOSH_DEP_TOOLCHAIN:-auto}" in
+        auto)
+            return 0
+            ;;
+        homebrew)
+            dep_prefix="/opt/homebrew"
+            ;;
+        zerobrew)
+            dep_prefix="/opt/zerobrew/prefix"
+            ;;
+        *)
+            echo "Unsupported MOSH_DEP_TOOLCHAIN='${MOSH_DEP_TOOLCHAIN}'. Use auto|homebrew|zerobrew." >&2
+            return 1
+            ;;
+    esac
+
+    if [ ! -d "$dep_prefix" ]; then
+        echo "Requested dependency toolchain prefix not found: $dep_prefix" >&2
+        return 1
+    fi
+
+    export PATH="${dep_prefix}/bin:$PATH"
+    unset CPATH
+    unset C_INCLUDE_PATH
+    unset CPLUS_INCLUDE_PATH
+    unset OBJC_INCLUDE_PATH
+    unset LIBRARY_PATH
+
+    pc_paths=()
+    [ -d "${dep_prefix}/lib/pkgconfig" ] && pc_paths+=("${dep_prefix}/lib/pkgconfig")
+    [ -d "${dep_prefix}/share/pkgconfig" ] && pc_paths+=("${dep_prefix}/share/pkgconfig")
+    [ -d "${dep_prefix}/opt/openssl@3/lib/pkgconfig" ] && pc_paths+=("${dep_prefix}/opt/openssl@3/lib/pkgconfig")
+    if [ ${#pc_paths[@]} -gt 0 ]; then
+        export PKG_CONFIG_PATH=$(IFS=:; echo "${pc_paths[*]}")
+    fi
+    unset PKG_CONFIG_LIBDIR
+
+    echo "Forcing dependency toolchain: ${MOSH_DEP_TOOLCHAIN} (${dep_prefix})"
+}
+
+force_dependency_toolchain
+
+is_system_dylib()
+{
+    case "$1" in
+        /System/Library/*|/usr/lib/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+list_non_system_dylibs()
+{
+    otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
+    do
+        case "$dep" in
+            ""|@*|[^/]*)
+                continue
+                ;;
+        esac
+        if ! is_system_dylib "$dep"; then
+            echo "$dep"
+        fi
+    done
+}
+
+resolve_protoc()
+{
+    if [ -n "$PROTOC" ]; then
+        echo "$PROTOC"
+        return 0
+    fi
+
+    if which -s pkg-config && pkg-config --exists protobuf; then
+        protobuf_prefix=$(pkg-config --variable=prefix protobuf 2> /dev/null || true)
+        if [ -n "$protobuf_prefix" ] && [ -x "${protobuf_prefix}/bin/protoc" ]; then
+            echo "${protobuf_prefix}/bin/protoc"
+            return 0
+        fi
+    fi
+
+    if which -s protoc; then
+        command -v protoc
+        return 0
+    fi
+
+    echo "Cannot find protoc. Install protobuf and ensure protoc is on PATH." >&2
+    return 1
+}
+
+resolve_existing_dylib_path()
+{
+    dep="$1"
+    if [ -e "$dep" ]; then
+        echo "$dep"
+        return 0
+    fi
+
+    dep_base=$(basename "$dep")
+    dep_parent=$(dirname "$(dirname "$dep")")
+    candidate="${dep_parent}/lib/${dep_base}"
+    if [ -e "$candidate" ]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    candidate=$(find "$dep_parent" -maxdepth 3 -type f -name "$dep_base" -print -quit 2> /dev/null || true)
+    if [ -n "$candidate" ] && [ -e "$candidate" ]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    echo "Unable to locate dylib payload for install_name path: $dep" >&2
+    return 1
+}
+
+bundle_non_system_dylibs()
+{
+    PREFIX_DIR="$1"
+    BINDIR="${PREFIX_DIR}/local/bin"
+    LIBDIR="${PREFIX_DIR}/local/lib"
+
+    mkdir -p "$LIBDIR"
+
+    changed=1
+    while [ "$changed" -eq 1 ]; do
+        changed=0
+        scan_targets=("${BINDIR}/mosh-client" "${BINDIR}/mosh-server")
+        while IFS= read -r dylib
+        do
+            scan_targets+=("$dylib")
+        done < <(find "$LIBDIR" -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+        for target in "${scan_targets[@]}"; do
+            [ -f "$target" ] || continue
+
+            while IFS= read -r dep
+            do
+                base=$(basename "$dep")
+                dest="${LIBDIR}/${base}"
+                dep_source=$(resolve_existing_dylib_path "$dep")
+
+                if [ ! -f "$dest" ]; then
+                    cp -Lf "$dep_source" "$dest"
+                    chmod u+w "$dest"
+                    changed=1
+                    continue
+                fi
+
+                if ! cmp -s "$dep_source" "$dest"; then
+                    echo "Dependency filename collision for ${base}:"
+                    echo "  $dep_source"
+                    echo "  $dest"
+                    return 1
+                fi
+            done < <(list_non_system_dylibs "$target")
+        done
+    done
+
+    for prog in "${BINDIR}/mosh-client" "${BINDIR}/mosh-server"; do
+        [ -f "$prog" ] || continue
+        while IFS= read -r dep
+        do
+            base=$(basename "$dep")
+            install_name_tool -change "$dep" "@executable_path/../lib/${base}" "$prog"
+        done < <(list_non_system_dylibs "$prog")
+    done
+
+    while IFS= read -r dylib
+    do
+        base=$(basename "$dylib")
+        install_name_tool -id "@loader_path/${base}" "$dylib"
+        while IFS= read -r dep
+        do
+            dep_base=$(basename "$dep")
+            install_name_tool -change "$dep" "@loader_path/${dep_base}" "$dylib"
+        done < <(list_non_system_dylibs "$dylib")
+    done < <(find "$LIBDIR" -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+    if which -s codesign; then
+        while IFS= read -r dylib
+        do
+            codesign --remove-signature "$dylib" > /dev/null 2>&1 || true
+            codesign --force --sign - "$dylib" > /dev/null
+        done < <(find "$LIBDIR" -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+        for prog in "${BINDIR}/mosh-client" "${BINDIR}/mosh-server"; do
+            [ -f "$prog" ] || continue
+            codesign --remove-signature "$prog" > /dev/null 2>&1 || true
+            codesign --force --sign - "$prog" > /dev/null
+        done
+    fi
+
+    # Verify that no non-system absolute dylib references remain.
+    unresolved=""
+    scan_targets=("${BINDIR}/mosh-client" "${BINDIR}/mosh-server")
+    while IFS= read -r dylib
+    do
+        scan_targets+=("$dylib")
+    done < <(find "$LIBDIR" -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+    for target in "${scan_targets[@]}"; do
+        [ -f "$target" ] || continue
+        deps=$(list_non_system_dylibs "$target" || true)
+        if [ -n "$deps" ]; then
+            unresolved+="$(printf '\n%s:\n%s' "$target" "$deps")"
+        fi
+    done
+
+    if [ -n "$unresolved" ]; then
+        printf 'Failed to rewrite some non-system dylib references:%s\n' "$unresolved"
+        return 1
+    fi
+
+    echo "Bundled non-system dylibs into ${LIBDIR}."
+}
 
 echo "Building into prefix..."
 
@@ -41,6 +285,21 @@ then
     PATH=/opt/homebrew/bin:$PATH ./autogen.sh
 fi
 
+PROTOC_BIN=$(resolve_protoc)
+echo "Using protoc at ${PROTOC_BIN}"
+if which -s pkg-config && pkg-config --exists protobuf; then
+    protobuf_prefix=$(pkg-config --variable=prefix protobuf)
+    protoc_prefix=$(dirname "$(dirname "$PROTOC_BIN")")
+    protobuf_toolchain=$(toolchain_family "$protobuf_prefix")
+    protoc_toolchain=$(toolchain_family "$protoc_prefix")
+    echo "Using protobuf $(pkg-config --modversion protobuf) from ${protobuf_prefix} (${protobuf_toolchain})"
+    if [ "$protobuf_toolchain" != "$protoc_toolchain" ]; then
+        echo "Refusing mixed toolchains: protoc is ${protoc_toolchain} (${protoc_prefix}), protobuf pkg-config is ${protobuf_toolchain} (${protobuf_prefix})." >&2
+        echo "Set MOSH_DEP_TOOLCHAIN=homebrew or MOSH_DEP_TOOLCHAIN=zerobrew to force one provider." >&2
+        exit 1
+    fi
+fi
+
 #
 # Build archs one by one.
 #
@@ -50,7 +309,8 @@ for triple in $ARCH_TRIPLES; do
     prefix="${PREFIX}_${arch}"
     rm -rf "${prefix}"
     mkdir "${prefix}"
-    if ./configure --prefix="${prefix}/local" --build="${triple}${MACOSX_DEPLOYMENT_TARGET}"\
+    if env PATH="$(dirname "$PROTOC_BIN"):$PATH" PROTOC="$PROTOC_BIN" \
+           ./configure --prefix="${prefix}/local" --build="${triple}${MACOSX_DEPLOYMENT_TARGET}"\
 		   --host="${HOST}" \
 		   CC="cc -arch ${arch}" CPP="cc -arch ${arch} -E" CXX="c++ -arch ${arch}" \
 		   TINFO_LIBS=-lncurses &&
@@ -90,6 +350,11 @@ for prog in local/bin/mosh-client local/bin/mosh-server; do
 done
 
 perl -wlpi -e 's{#!/usr/bin/env perl}{#!/usr/bin/perl}' "$PREFIX/local/bin/mosh"
+
+if [ "${MOSH_BUNDLE_DYLIBS:-1}" != "0" ]; then
+    echo "Bundling non-system dylibs into package prefix..."
+    bundle_non_system_dylibs "$PREFIX"
+fi
 
 popd > /dev/null
 

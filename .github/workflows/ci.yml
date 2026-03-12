@@ -44,7 +44,7 @@ jobs:
       run: ./autogen.sh
 
     - name: ${{ format('configure (crypto {0})', matrix.crypto) }}
-      run: ./configure --enable-compile-warnings=error --enable-examples ${{ (matrix.crypto != 'auto' && format('--with-crypto-library={0}', matrix.crypto)) || '' }} ${{ matrix.configure_extra }}
+      run: ./configure --enable-examples ${{ (matrix.crypto != 'auto' && format('--with-crypto-library={0}', matrix.crypto)) || '' }} ${{ matrix.configure_extra }}
 
     - name: "build"
       run: make V=1

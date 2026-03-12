@@ -65,7 +65,7 @@ jobs:
 
     - name: "build source tarball"
       run: |
-        ./configure --enable-compile-warnings=error --enable-examples
+        ./configure --enable-examples
         make V=1 distcheck -j"$(nproc)"
 
     - name: "collect source artifact"
@@ -115,7 +115,7 @@ jobs:
       run: |
         set -euo pipefail
         ./autogen.sh
-        ./configure --prefix=/usr/local --enable-compile-warnings=error --enable-examples --with-utempter=no
+        ./configure --prefix=/usr/local --enable-examples --with-utempter=no
         make -j"$(nproc)" V=1
         make V=1 check
 

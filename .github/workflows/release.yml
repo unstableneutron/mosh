@@ -147,8 +147,8 @@ jobs:
         env ZERO_AR_DATE=1 MACOSX_DEPLOYMENT_TARGET=11.0 MOSH_DEP_TOOLCHAIN=homebrew ./build.sh
         popd
 
-        rm -rf pkg dist
-        mkdir -p pkg/bin pkg/lib pkg/share/man/man1 dist
+        rm -rf pkg release_pkg dist
+        mkdir -p pkg/bin pkg/lib pkg/share/man/man1 release_pkg/man/man1 dist
 
         cp macosx/prefix/local/bin/mosh pkg/bin/
         cp macosx/prefix/local/bin/mosh-client pkg/bin/
@@ -158,26 +158,51 @@ jobs:
         cp COPYING pkg/ 2>/dev/null || true
         cp README* pkg/ 2>/dev/null || true
 
-        tar -C pkg -czf "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" .
+        # Mise's github backend flattens release tarballs, so package macOS
+        # binaries and dylibs in a flat layout and rewrite client/server dylib
+        # references to same-directory paths.
+        cp pkg/bin/mosh release_pkg/
+        cp pkg/bin/mosh-client release_pkg/
+        cp pkg/bin/mosh-server release_pkg/
+        find pkg/lib -maxdepth 1 -type f -name '*.dylib' -exec cp {} release_pkg/ \;
+        cp pkg/share/man/man1/mosh*.1 release_pkg/man/man1/ || true
+        cp COPYING release_pkg/ 2>/dev/null || true
+        cp README* release_pkg/ 2>/dev/null || true
+
+        for prog in release_pkg/mosh-client release_pkg/mosh-server; do
+          while IFS= read -r dep; do
+            base=$(basename "$dep")
+            install_name_tool -change "$dep" "@executable_path/${base}" "$prog"
+          done < <(otool -L "$prog" | awk '{print $1}' | grep '^@executable_path/../lib/' || true)
+        done
+
+        if which -s codesign; then
+          for prog in release_pkg/mosh-client release_pkg/mosh-server; do
+            codesign --remove-signature "$prog" > /dev/null 2>&1 || true
+            codesign --force --sign - "$prog" > /dev/null
+          done
+        fi
+
+        tar -C release_pkg -czf "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" .
 
         installer_pkg=$(find macosx -maxdepth 1 -type f -name '*.pkg' -print -quit)
         if [ -n "$installer_pkg" ]; then
           cp "$installer_pkg" "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-installer.pkg"
         fi
 
-        check_targets=(pkg/bin/mosh-client pkg/bin/mosh-server)
+        check_targets=(release_pkg/mosh-client release_pkg/mosh-server)
         while IFS= read -r dylib; do
           check_targets+=("$dylib")
-        done < <(find pkg/lib -maxdepth 1 -type f -name '*.dylib' -print | sort)
+        done < <(find release_pkg -maxdepth 1 -type f -name '*.dylib' -print | sort)
 
-        unresolved=$(otool -L "${check_targets[@]}" | awk '{print $1}' | grep -E '(^@rpath/|^/opt/homebrew/|^/usr/local/|^/opt/zerobrew/|^/opt/local/)' || true)
+        unresolved=$(otool -L "${check_targets[@]}" | awk '{print $1}' | grep -E '(^@rpath/|^@executable_path/\.\./lib/|^/opt/homebrew/|^/usr/local/|^/opt/zerobrew/|^/opt/local/)' || true)
         if [ -n "$unresolved" ]; then
           printf 'Unexpected dylib references detected:\n%s\n' "$unresolved" >&2
           exit 1
         fi
 
-        pkg/bin/mosh-client --version
-        pkg/bin/mosh-server --version
+        release_pkg/mosh-client --version
+        release_pkg/mosh-server --version
 
     - uses: actions/upload-artifact@v4
       with:

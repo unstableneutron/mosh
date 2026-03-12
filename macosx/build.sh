@@ -31,13 +31,13 @@ DEPENDENCY_PREFIX=""
 toolchain_family()
 {
     case "$1" in
-        /opt/homebrew/*|/usr/local/*)
+        /opt/homebrew|/opt/homebrew/*|/usr/local|/usr/local/*)
             echo "homebrew"
             ;;
-        /opt/zerobrew/*)
+        /opt/zerobrew/prefix|/opt/zerobrew/*)
             echo "zerobrew"
             ;;
-        /opt/local/*)
+        /opt/local|/opt/local/*)
             echo "macports"
             ;;
         *)

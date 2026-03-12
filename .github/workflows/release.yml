@@ -158,9 +158,9 @@ jobs:
         cp COPYING pkg/ 2>/dev/null || true
         cp README* pkg/ 2>/dev/null || true
 
-        # Mise's github backend flattens release tarballs, so package macOS
-        # binaries and dylibs in a flat layout and rewrite client/server dylib
-        # references to same-directory paths.
+        # Keep a flat layout for the macOS release tarball so
+        # `mise install github:unstableneutron/mosh` can run binaries directly
+        # from the extracted tool directory.
         cp pkg/bin/mosh release_pkg/
         cp pkg/bin/mosh-client release_pkg/
         cp pkg/bin/mosh-server release_pkg/
@@ -184,6 +184,14 @@ jobs:
         fi
 
         tar -C release_pkg -czf "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" .
+
+        tarball="dist/mosh-${{ needs.validate-tag.outputs.release_version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+        smoke_dir=$(mktemp -d)
+        tar -C "$smoke_dir" -xzf "$tarball"
+        "$smoke_dir/mosh-client" --version
+        "$smoke_dir/mosh-server" --version
+        PATH="$smoke_dir:$PATH" "$smoke_dir/mosh" --help >/dev/null
+        rm -rf "$smoke_dir"
 
         installer_pkg=$(find macosx -maxdepth 1 -type f -name '*.pkg' -print -quit)
         if [ -n "$installer_pkg" ]; then

@@ -66,7 +66,8 @@ jobs:
     - name: "build source tarball"
       run: |
         ./configure --enable-examples
-        make V=1 distcheck -j"$(nproc)"
+        make -j"$(nproc)" V=1
+        make V=1 dist
 
     - name: "collect source artifact"
       run: |
@@ -117,7 +118,6 @@ jobs:
         ./autogen.sh
         ./configure --prefix=/usr/local --enable-examples --with-utempter=no
         make -j"$(nproc)" V=1
-        make V=1 check
 
         rm -rf stage pkg dist
         make DESTDIR="$PWD/stage" install

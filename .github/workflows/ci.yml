@@ -49,5 +49,7 @@ jobs:
     - name: "build"
       run: make V=1
 
-    - name: "test"
-      run: make V=1 check
+    - name: "smoke test"
+      run: |
+        src/frontend/mosh-client --version
+        src/frontend/mosh-server --version

@@ -126,6 +126,103 @@ list_non_system_dylibs()
     done
 }
 
+list_rewritable_dylib_refs()
+{
+    otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
+    do
+        case "$dep" in
+            "")
+                continue
+                ;;
+            @rpath/*)
+                echo "$dep"
+                ;;
+            /System/Library/*|/usr/lib/*)
+                continue
+                ;;
+            /*)
+                echo "$dep"
+                ;;
+        esac
+    done
+}
+
+expand_path_tokens()
+{
+    path="$1"
+    target="$2"
+
+    case "$path" in
+        @loader_path/*)
+            echo "$(dirname "$target")/${path#@loader_path/}"
+            return 0
+            ;;
+        @executable_path/*)
+            if [ -n "$BUNDLE_EXEC_DIR" ]; then
+                echo "${BUNDLE_EXEC_DIR}/${path#@executable_path/}"
+                return 0
+            fi
+            ;;
+    esac
+
+    echo "$path"
+}
+
+list_rpaths()
+{
+    otool -l "$1" | awk '
+      $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+      in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+    '
+}
+
+resolve_rpath_dep()
+{
+    target="$1"
+    dep="$2"
+
+    suffix="${dep#@rpath/}"
+    list_rpaths "$target" | while IFS= read -r rpath
+    do
+        [ -n "$rpath" ] || continue
+        expanded_rpath=$(expand_path_tokens "$rpath" "$target")
+        candidate="${expanded_rpath%/}/${suffix}"
+        if [ -e "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    # Fallback for Homebrew-style libs that rely on consumer rpaths.
+    dep_base=$(basename "$dep")
+    local_candidate="$(dirname "$target")/${dep_base}"
+    if [ -e "$local_candidate" ]; then
+        echo "$local_candidate"
+        return 0
+    fi
+
+    for prefix in "$DEPENDENCY_PREFIX" /opt/homebrew /opt/zerobrew/prefix /usr/local /opt/local; do
+        [ -n "$prefix" ] || continue
+        [ -d "$prefix" ] || continue
+
+        for root in "$prefix/lib" "$prefix/opt"; do
+            [ -d "$root" ] || continue
+
+            direct="${root%/}/${dep_base}"
+            if [ -e "$direct" ]; then
+                echo "$direct"
+                return 0
+            fi
+
+            found=$(find "$root" -maxdepth 4 -type f -name "$dep_base" -print -quit 2> /dev/null || true)
+            if [ -n "$found" ] && [ -e "$found" ]; then
+                echo "$found"
+                return 0
+            fi
+        done
+    done
+}
+
 list_unresolved_special_dylibs()
 {
     otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
@@ -188,11 +285,37 @@ resolve_existing_dylib_path()
     return 1
 }
 
+resolve_dep_source()
+{
+    target="$1"
+    dep="$2"
+
+    case "$dep" in
+        @rpath/*)
+            source=$(resolve_rpath_dep "$target" "$dep" || true)
+            if [ -n "$source" ] && [ -e "$source" ]; then
+                echo "$source"
+                return 0
+            fi
+            echo "Unable to resolve @rpath dependency $dep from $target" >&2
+            return 1
+            ;;
+        /*)
+            resolve_existing_dylib_path "$dep"
+            return $?
+            ;;
+    esac
+
+    echo "Unsupported dependency reference: $dep" >&2
+    return 1
+}
+
 bundle_non_system_dylibs()
 {
     PREFIX_DIR="$1"
     BINDIR="${PREFIX_DIR}/local/bin"
     LIBDIR="${PREFIX_DIR}/local/lib"
+    BUNDLE_EXEC_DIR="$BINDIR"
 
     mkdir -p "$LIBDIR"
 
@@ -212,7 +335,7 @@ bundle_non_system_dylibs()
             do
                 base=$(basename "$dep")
                 dest="${LIBDIR}/${base}"
-                dep_source=$(resolve_existing_dylib_path "$dep")
+                dep_source=$(resolve_dep_source "$target" "$dep")
 
                 if [ ! -f "$dest" ]; then
                     cp -Lf "$dep_source" "$dest"
@@ -227,7 +350,7 @@ bundle_non_system_dylibs()
                     echo "  $dest"
                     return 1
                 fi
-            done < <(list_non_system_dylibs "$target")
+            done < <(list_rewritable_dylib_refs "$target")
         done
     done
 
@@ -237,7 +360,7 @@ bundle_non_system_dylibs()
         do
             base=$(basename "$dep")
             install_name_tool -change "$dep" "@executable_path/../lib/${base}" "$prog"
-        done < <(list_non_system_dylibs "$prog")
+        done < <(list_rewritable_dylib_refs "$prog")
     done
 
     while IFS= read -r dylib
@@ -248,7 +371,7 @@ bundle_non_system_dylibs()
         do
             dep_base=$(basename "$dep")
             install_name_tool -change "$dep" "@loader_path/${dep_base}" "$dylib"
-        done < <(list_non_system_dylibs "$dylib")
+        done < <(list_rewritable_dylib_refs "$dylib")
     done < <(find "$LIBDIR" -maxdepth 1 -type f -name '*.dylib' -print | sort)
 
     if which -s codesign; then

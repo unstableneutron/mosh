@@ -69,6 +69,23 @@ Getting Mosh
   users.  We have confirmed that this is the case on GNU/Linux, OS X, and
   FreeBSD.
 
+Installing Release Builds with mise
+-----------------------------------
+
+   This fork publishes GitHub release assets named like
+   `mosh-<version>-linux-x64.tar.gz`, `mosh-<version>-linux-arm64.tar.gz`, and
+   `mosh-<version>-macos-arm64.tar.gz`, which are suitable for
+   `mise install github:unstableneutron/mosh`.
+
+   If you pin an explicit version with the GitHub backend, configure
+   `version_prefix = "mosh-"` so mise resolves tags like
+   `mosh-1.4.0-customized` correctly:
+
+  ```toml
+  [tools]
+  "github:unstableneutron/mosh" = { version = "1.4.0-customized", version_prefix = "mosh-" }
+  ```
+
 Usage
 -----
 

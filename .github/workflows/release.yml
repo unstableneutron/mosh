@@ -3,132 +3,226 @@ name: Release
 on:
   push:
     tags:
-      # This syntax is globs, not regex, so it's matching any tag that
-      # contains the prefix "mosh-" and the 3 version elements.
       - "mosh-*.*.*"
 
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  macports-cache:
-    runs-on: macos-12
+  validate-tag:
+    runs-on: ubuntu-24.04
+
+    outputs:
+      release_version: ${{ steps.meta.outputs.release_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
-    - name: "Install gtar wrapper"
+    - id: meta
+      name: "validate release tag"
       run: |
-        sudo mv /usr/local/bin/gtar /usr/local/bin/gtar.orig
-        sudo cp macosx/gtar /usr/local/bin/gtar
-        sudo chmod +x /usr/local/bin/gtar
+        set -euo pipefail
+        tag="${GITHUB_REF_NAME}"
+        version="$(sed -n 's/AC_INIT(\[[^]]*\], \[\([^]]*\)\].*/\1/p' configure.ac)"
+        canonical="mosh-${version}"
+        customized="mosh-${version}-customized"
 
-    - name: Cache macports
-      id: cache-macports
-      uses: actions/cache@v3
-      env:
-        cache-name: cache-macports
-      with:
-        path: /opt/local
-        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('macosx/port-deps.sh') }}
-        restore-keys: |
-          ${{ runner.os }}-build-${{ env.cache-name }}-
-          ${{ runner.os }}-build-
-          ${{ runner.os }}-
+        if [ "${tag}" != "${canonical}" ] && [ "${tag}" != "${customized}" ]; then
+          echo "Expected '${canonical}' or '${customized}', got '${tag}'" >&2
+          exit 1
+        fi
 
-    - name: "setup MacPorts environment"
-      run: |
-        curl -L "https://github.com/macports/macports-base/releases/download/v2.7.2/MacPorts-2.7.2-12-Monterey.pkg" --output macports.pkg
-        sudo installer -pkg macports.pkg -target /
-        ./macosx/port-deps.sh deps
+        release_version="${tag#mosh-}"
+        base_version="${release_version%-customized}"
 
-  release:
-    needs: macports-cache
-    runs-on: ${{ matrix.os }}
+        echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
 
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, macos-12]
+        if [[ "${base_version}" == *-* ]]; then
+          echo "prerelease=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+        fi
+
+  source-dist:
+    needs: validate-tag
+    runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@v2
-
-    - name: "ensure version bumped"
-      run: |
-        expected_tag=$(echo ${{ github.ref }} | cut -d'/' -f3)
-        have_tag="mosh-$(sed -n 's/AC_INIT(\[[^]]*\], \[\([^]]*\)\].*/\1/p' <configure.ac)"
-        echo "Expected tag <$expected_tag>, got <$have_tag>"
-        if [[ "$expected_tag" != "$have_tag" ]]; then exit 1; fi
+    - uses: actions/checkout@v4
 
     - name: "setup linux build environment"
-      if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: sudo apt install -y protobuf-compiler libprotobuf-dev libutempter-dev autoconf automake nettle-dev
-
-    - name: "Install gtar wrapper"
-      if: ${{ startsWith(matrix.os, 'macos') }}
       run: |
-        sudo mv /usr/local/bin/gtar /usr/local/bin/gtar.orig
-        sudo cp macosx/gtar /usr/local/bin/gtar
-        sudo chmod +x /usr/local/bin/gtar
-
-    - name: Restore macports cache
-      id: cache-macports
-      if: ${{ startsWith(matrix.os, 'macos') }}
-      uses: actions/cache@v3
-      env:
-        cache-name: cache-macports
-      with:
-        path: /opt/local
-        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('macosx/port-deps.sh') }}
-        restore-keys: |
-          ${{ runner.os }}-build-${{ env.cache-name }}-
-          ${{ runner.os }}-build-
-          ${{ runner.os }}-
-
-    - name: "describe macos build environment"
-      if: ${{ startsWith(matrix.os, 'macos') }}
-      run: |
-        BUILD_TAG=$(echo ${{ github.ref }} | cut -d'/' -f3)
-        mkdir macosx/build-report &&
-        pushd macosx/build-report &&
-        ../port-deps.sh describe &&
-        ../osx-xcode.sh describe &&
-        tar -cjf "../${BUILD_TAG}-osx-build-report.tbz" . &&
-        popd
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libutempter-dev autoconf automake nettle-dev
 
     - name: "generate build scripts"
-      run: PATH=/opt/local/bin:$PATH ./autogen.sh
+      run: ./autogen.sh
 
-    - name: "configure"
-      if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: ./configure --enable-compile-warnings=error --enable-examples
-
-    - name: "build"
-      if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: make V=1
-
-    - name: "test"
-      if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: make V=1 distcheck -j
-
-    - name: "unshallow git repository for git describe"
-      if: ${{ startsWith(matrix.os, 'macos') }}
-      run: git fetch --tags --unshallow -f
-
-    - name: "macOS package build"
-      if: ${{ startsWith(matrix.os, 'macos') }}
+    - name: "build source tarball"
       run: |
-        pushd macosx &&
-        env ZERO_AR_DATE=1 MACOSX_DEPLOYMENT_TARGET=11.0 PATH=/opt/local/bin:$PATH ./build.sh &&
+        ./configure --enable-compile-warnings=error --enable-examples
+        make V=1 distcheck -j"$(nproc)"
+
+    - name: "collect source artifact"
+      run: |
+        mkdir -p dist
+        src_tarball=$(ls mosh-*.tar.gz | head -n 1)
+        cp "$src_tarball" "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-src.tar.gz"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-source
+        path: dist/*
+        if-no-files-found: error
+
+  build-binaries:
+    needs: validate-tag
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64
+            runner: ubuntu-22.04
+            os: linux
+            arch: x64
+          - id: linux-arm64
+            runner: ubuntu-22.04-arm
+            os: linux
+            arch: arm64
+          - id: macos-arm64
+            runner: macos-14
+            os: macos
+            arch: arm64
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: "setup linux build environment"
+      if: ${{ matrix.os == 'linux' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev autoconf automake nettle-dev
+
+    - name: "build and package linux artifacts"
+      if: ${{ matrix.os == 'linux' }}
+      run: |
+        set -euo pipefail
+        ./autogen.sh
+        ./configure --prefix=/usr/local --enable-compile-warnings=error --enable-examples --with-utempter=no
+        make -j"$(nproc)" V=1
+        make V=1 check
+
+        rm -rf stage pkg dist
+        make DESTDIR="$PWD/stage" install
+        mkdir -p pkg/bin pkg/share/man/man1 dist
+
+        cp stage/usr/local/bin/mosh pkg/bin/
+        cp stage/usr/local/bin/mosh-client pkg/bin/
+        cp stage/usr/local/bin/mosh-server pkg/bin/
+        cp stage/usr/local/share/man/man1/mosh*.1 pkg/share/man/man1/ || true
+        cp COPYING pkg/ 2>/dev/null || true
+        cp README* pkg/ 2>/dev/null || true
+
+        tar -C pkg -czf "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" .
+
+        pkg/bin/mosh-client --version
+        pkg/bin/mosh-server --version
+
+    - name: "setup macos build environment"
+      if: ${{ matrix.os == 'macos' }}
+      run: brew install autoconf automake pkg-config protobuf ncurses
+
+    - name: "build and package macos artifacts"
+      if: ${{ matrix.os == 'macos' }}
+      run: |
+        set -euo pipefail
+        pushd macosx
+        env ZERO_AR_DATE=1 MACOSX_DEPLOYMENT_TARGET=11.0 MOSH_DEP_TOOLCHAIN=homebrew ./build.sh
         popd
 
-    - name: "Upload Release"
-      # v1 aka v0.1.14 as of 2022-07-05; pinned to avoid potential code injection
-      uses: softprops/action-gh-release@1e07f4398721186383de40550babbdf2b84acfc5
+        rm -rf pkg dist
+        mkdir -p pkg/bin pkg/lib pkg/share/man/man1 dist
+
+        cp macosx/prefix/local/bin/mosh pkg/bin/
+        cp macosx/prefix/local/bin/mosh-client pkg/bin/
+        cp macosx/prefix/local/bin/mosh-server pkg/bin/
+        cp -R macosx/prefix/local/lib/. pkg/lib/
+        cp macosx/prefix/local/share/man/man1/mosh*.1 pkg/share/man/man1/ || true
+        cp COPYING pkg/ 2>/dev/null || true
+        cp README* pkg/ 2>/dev/null || true
+
+        tar -C pkg -czf "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" .
+
+        installer_pkg=$(find macosx -maxdepth 1 -type f -name '*.pkg' -print -quit)
+        if [ -n "$installer_pkg" ]; then
+          cp "$installer_pkg" "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-installer.pkg"
+        fi
+
+        check_targets=(pkg/bin/mosh-client pkg/bin/mosh-server)
+        while IFS= read -r dylib; do
+          check_targets+=("$dylib")
+        done < <(find pkg/lib -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+        unresolved=$(otool -L "${check_targets[@]}" | awk '{print $1}' | grep -E '(^@rpath/|^/opt/homebrew/|^/usr/local/|^/opt/zerobrew/|^/opt/local/)' || true)
+        if [ -n "$unresolved" ]; then
+          printf 'Unexpected dylib references detected:\n%s\n' "$unresolved" >&2
+          exit 1
+        fi
+
+        pkg/bin/mosh-client --version
+        pkg/bin/mosh-server --version
+
+    - uses: actions/upload-artifact@v4
       with:
-        # Action always creates releases in "draft" mode, and requires
-        # a maintainer to publish them
-        draft: True
-        prerelease: ${{ contains(github.ref, 'rc') }}
-        generate_release_notes: True
-        files: |
-          mosh-*.tar.gz
-          macosx/*.pkg
-          macosx/*-osx-build-report.tbz
+        name: release-${{ matrix.id }}
+        path: dist/*
+        if-no-files-found: error
+
+  publish-release:
+    needs:
+      - validate-tag
+      - source-dist
+      - build-binaries
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: release-assets
+
+    - name: "prepare release files"
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        find release-assets -maxdepth 2 -type f -exec cp {} dist/ \;
+
+        expected=(
+          "mosh-${{ needs.validate-tag.outputs.release_version }}-src.tar.gz"
+          "mosh-${{ needs.validate-tag.outputs.release_version }}-linux-x64.tar.gz"
+          "mosh-${{ needs.validate-tag.outputs.release_version }}-linux-arm64.tar.gz"
+          "mosh-${{ needs.validate-tag.outputs.release_version }}-macos-arm64.tar.gz"
+        )
+        for asset in "${expected[@]}"; do
+          if [ ! -f "dist/${asset}" ]; then
+            echo "Missing expected asset: ${asset}" >&2
+            exit 1
+          fi
+        done
+
+        (cd dist && sha256sum * > SHA256SUMS)
+
+    - name: "upload release"
+      uses: softprops/action-gh-release@v2
+      with:
+        draft: false
+        prerelease: ${{ needs.validate-tag.outputs.prerelease }}
+        generate_release_notes: true
+        files: dist/*
+        fail_on_unmatched_files: true

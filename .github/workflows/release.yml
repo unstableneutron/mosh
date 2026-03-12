@@ -6,7 +6,7 @@ on:
       - "mosh-*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,7 +21,7 @@ jobs:
       prerelease: ${{ steps.meta.outputs.prerelease }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
     - id: meta
       name: "validate release tag"
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
     - name: "setup linux build environment"
       run: |
@@ -69,13 +69,24 @@ jobs:
         make -j"$(nproc)" V=1
         make V=1 dist
 
+    - name: "smoke test source tarball"
+      run: |
+        set -euo pipefail
+        src_tarball=$(ls mosh-*.tar.gz | head -n 1)
+        smoke_dir=$(mktemp -d)
+        tar -C "$smoke_dir" -xzf "$src_tarball"
+        src_dir=$(find "$smoke_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+        cd "$src_dir"
+        ./configure --enable-examples
+        make -j"$(nproc)" V=1
+
     - name: "collect source artifact"
       run: |
         mkdir -p dist
         src_tarball=$(ls mosh-*.tar.gz | head -n 1)
         cp "$src_tarball" "dist/mosh-${{ needs.validate-tag.outputs.release_version }}-src.tar.gz"
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: release-source
         path: dist/*
@@ -103,7 +114,7 @@ jobs:
             arch: arm64
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
     - name: "setup linux build environment"
       if: ${{ matrix.os == 'linux' }}
@@ -212,13 +223,15 @@ jobs:
         release_pkg/mosh-client --version
         release_pkg/mosh-server --version
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: release-${{ matrix.id }}
         path: dist/*
         if-no-files-found: error
 
   publish-release:
+    permissions:
+      contents: write
     needs:
       - validate-tag
       - source-dist
@@ -226,7 +239,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
         path: release-assets
 
@@ -252,7 +265,7 @@ jobs:
         (cd dist && sha256sum * > SHA256SUMS)
 
     - name: "upload release"
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b
       with:
         draft: false
         prerelease: ${{ needs.validate-tag.outputs.prerelease }}

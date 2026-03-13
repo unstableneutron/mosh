@@ -73,6 +73,20 @@ jobs:
       run: |
         set -euo pipefail
         src_tarball=$(ls mosh-*.tar.gz | head -n 1)
+        tar_manifest=$(mktemp)
+        tar -tzf "$src_tarball" > "$tar_manifest"
+
+        required_paths=(
+          "src/util/char_utils.h"
+          "src/util/widechar_width.h"
+        )
+        for relpath in "${required_paths[@]}"; do
+          if ! grep -Eq "/${relpath}$" "$tar_manifest"; then
+            echo "Source tarball missing required file: ${relpath}" >&2
+            exit 1
+          fi
+        done
+
         smoke_dir=$(mktemp -d)
         tar -C "$smoke_dir" -xzf "$src_tarball"
         src_dir=$(find "$smoke_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)

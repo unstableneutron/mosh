@@ -31,14 +31,23 @@ jobs:
         version="$(sed -n 's/AC_INIT(\[[^]]*\], \[\([^]]*\)\].*/\1/p' configure.ac)"
         canonical="mosh-${version}"
         customized="mosh-${version}-customized"
+        customized_revision=""
 
-        if [ "${tag}" != "${canonical}" ] && [ "${tag}" != "${customized}" ]; then
-          echo "Expected '${canonical}' or '${customized}', got '${tag}'" >&2
+        if [ "${tag}" = "${canonical}" ] || [ "${tag}" = "${customized}" ]; then
+          base_version="${version}"
+        elif [[ "${tag}" == "${customized}."* ]]; then
+          customized_revision="${tag#${customized}.}"
+          if ! [[ "${customized_revision}" =~ ^[0-9]+$ ]]; then
+            echo "Expected numeric revision suffix after '${customized}.', got '${tag}'" >&2
+            exit 1
+          fi
+          base_version="${version}"
+        else
+          echo "Expected '${canonical}', '${customized}', or '${customized}.<revision>', got '${tag}'" >&2
           exit 1
         fi
 
         release_version="${tag#mosh-}"
-        base_version="${release_version%-customized}"
 
         echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
 

@@ -92,7 +92,8 @@ force_dependency_toolchain()
     [ -d "${dep_prefix}/share/pkgconfig" ] && pc_paths+=("${dep_prefix}/share/pkgconfig")
     [ -d "${dep_prefix}/opt/openssl@3/lib/pkgconfig" ] && pc_paths+=("${dep_prefix}/opt/openssl@3/lib/pkgconfig")
     if [ ${#pc_paths[@]} -gt 0 ]; then
-        export PKG_CONFIG_PATH=$(IFS=:; echo "${pc_paths[*]}")
+        PKG_CONFIG_PATH=$(IFS=:; echo "${pc_paths[*]}")
+        export PKG_CONFIG_PATH
     fi
     unset PKG_CONFIG_LIBDIR
 
@@ -176,6 +177,89 @@ list_rpaths()
     '
 }
 
+ensure_rpath()
+{
+    target="$1"
+    rpath="$2"
+
+    if ! list_rpaths "$target" | grep -Fx -- "$rpath" > /dev/null; then
+        install_name_tool -add_rpath "$rpath" "$target"
+    fi
+}
+
+normalize_executable_rpaths()
+{
+    target="$1"
+
+    while IFS= read -r rpath
+    do
+        [ -n "$rpath" ] || continue
+        case "$rpath" in
+            @executable_path/lib|@executable_path/../lib|@executable_path)
+                ;;
+            *)
+                install_name_tool -delete_rpath "$rpath" "$target"
+                ;;
+        esac
+    done < <(list_rpaths "$target")
+
+    # Prefer colocated ./lib first, then brew-style ../lib, then the
+    # executable directory as a final fallback.
+    ensure_rpath "$target" "@executable_path/lib"
+    ensure_rpath "$target" "@executable_path/../lib"
+    ensure_rpath "$target" "@executable_path"
+}
+
+clear_all_rpaths()
+{
+    target="$1"
+
+    while IFS= read -r rpath
+    do
+        [ -n "$rpath" ] || continue
+        install_name_tool -delete_rpath "$rpath" "$target"
+    done < <(list_rpaths "$target")
+}
+
+list_unresolved_loader_path_dylibs()
+{
+    target="$1"
+    otool -L "$target" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
+    do
+        case "$dep" in
+            @loader_path/*)
+                candidate="$(dirname "$target")/${dep#@loader_path/}"
+                if [ ! -e "$candidate" ]; then
+                    echo "$dep"
+                fi
+                ;;
+        esac
+    done
+}
+
+list_unexpected_rpaths()
+{
+    target="$1"
+    list_rpaths "$target" | while IFS= read -r rpath
+    do
+        [ -n "$rpath" ] || continue
+        case "$target" in
+            */mosh-client|*/mosh-server)
+                case "$rpath" in
+                    @executable_path/lib|@executable_path/../lib|@executable_path)
+                        ;;
+                    *)
+                        echo "$rpath"
+                        ;;
+                esac
+                ;;
+            *)
+                echo "$rpath"
+                ;;
+        esac
+    done
+}
+
 resolve_rpath_dep()
 {
     target="$1"
@@ -225,11 +309,15 @@ resolve_rpath_dep()
 
 list_unresolved_special_dylibs()
 {
-    otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
+    target="$1"
+    otool -L "$target" | tail -n +2 | awk '{print $1}' | while IFS= read -r dep
     do
         case "$dep" in
             @rpath/*)
-                echo "$dep"
+                resolved=$(resolve_rpath_dep "$target" "$dep" || true)
+                if [ -z "$resolved" ] || [ ! -e "$resolved" ]; then
+                    echo "$dep"
+                fi
                 ;;
         esac
     done
@@ -359,8 +447,9 @@ bundle_non_system_dylibs()
         while IFS= read -r dep
         do
             base=$(basename "$dep")
-            install_name_tool -change "$dep" "@executable_path/../lib/${base}" "$prog"
+            install_name_tool -change "$dep" "@rpath/${base}" "$prog"
         done < <(list_rewritable_dylib_refs "$prog")
+        normalize_executable_rpaths "$prog"
     done
 
     while IFS= read -r dylib
@@ -372,6 +461,7 @@ bundle_non_system_dylibs()
             dep_base=$(basename "$dep")
             install_name_tool -change "$dep" "@loader_path/${dep_base}" "$dylib"
         done < <(list_rewritable_dylib_refs "$dylib")
+        clear_all_rpaths "$dylib"
     done < <(find "$LIBDIR" -maxdepth 1 -type f -name '*.dylib' -print | sort)
 
     if which -s codesign; then
@@ -405,6 +495,14 @@ bundle_non_system_dylibs()
         deps_special=$(list_unresolved_special_dylibs "$target" || true)
         if [ -n "$deps_special" ]; then
             unresolved+="$(printf '\n%s:\n%s' "$target" "$deps_special")"
+        fi
+        deps_loader=$(list_unresolved_loader_path_dylibs "$target" || true)
+        if [ -n "$deps_loader" ]; then
+            unresolved+="$(printf '\n%s:\n%s' "$target" "$deps_loader")"
+        fi
+        unexpected_rpaths=$(list_unexpected_rpaths "$target" || true)
+        if [ -n "$unexpected_rpaths" ]; then
+            unresolved+="$(printf '\n%s:\nunexpected LC_RPATH entries:\n%s' "$target" "$unexpected_rpaths")"
         fi
     done
 
@@ -460,12 +558,13 @@ fi
 # Build archs one by one.
 #
 for triple in $ARCH_TRIPLES; do
-    arch=$(echo $triple | cut -d- -f1)
+    arch=$(echo "$triple" | cut -d- -f1)
     echo "Building for ${arch}..."
     prefix="${PREFIX}_${arch}"
     rm -rf "${prefix}"
     mkdir "${prefix}"
     if env PATH="$(dirname "$PROTOC_BIN"):$PATH" PROTOC="$PROTOC_BIN" \
+           LDFLAGS="${LDFLAGS:+$LDFLAGS }-Wl,-headerpad_max_install_names" \
            ./configure --prefix="${prefix}/local" --build="${triple}${MACOSX_DEPLOYMENT_TARGET}"\
 		   --host="${HOST}" \
 		   CC="cc -arch ${arch}" CPP="cc -arch ${arch} -E" CXX="c++ -arch ${arch}" \
@@ -527,9 +626,8 @@ if which -s pkgbuild; then
     #   use it as the --distribution input file for productbuild
     echo "Preprocessing package description..."
     PKGID=edu.mit.mosh.mosh.pkg
-    for file in Distribution; do
+    file=Distribution
 	sed -e "s/@PACKAGE_VERSION@/${PACKAGE_VERSION}/g" ${file}.in > ${file}
-    done
     echo "Running pkgbuild/productbuild..."
     mkdir -p Resources/en.lproj
     cp -p copying.rtf Resources/en.lproj/License
@@ -549,7 +647,7 @@ else
     pushd "$INDIR" > /dev/null
     for file in *
     do
-	sed -e 's/$PACKAGE_VERSION/'"$PACKAGE_VERSION"'/g' "$file" > "../$OUTDIR/$file"
+	sed -e "s/\$PACKAGE_VERSION/$PACKAGE_VERSION/g" "$file" > "../$OUTDIR/$file"
     done
     popd > /dev/null
     echo "Running PackageMaker..."

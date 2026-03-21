@@ -182,7 +182,7 @@ jobs:
         popd
 
         rm -rf pkg release_pkg dist
-        mkdir -p pkg/bin pkg/lib pkg/share/man/man1 release_pkg/man/man1 dist
+        mkdir -p pkg/bin pkg/lib pkg/share/man/man1 release_pkg/lib release_pkg/man/man1 dist
 
         cp macosx/prefix/local/bin/mosh pkg/bin/
         cp macosx/prefix/local/bin/mosh-client pkg/bin/
@@ -192,22 +192,34 @@ jobs:
         cp COPYING pkg/ 2>/dev/null || true
         cp README* pkg/ 2>/dev/null || true
 
-        # Keep a flat layout for the macOS release tarball so
-        # `mise install github:unstableneutron/mosh` can run binaries directly
-        # from the extracted tool directory.
+        # Keep binaries in a flat layout for `mise install` and place dylibs
+        # under ./lib while allowing fallback to the executable directory.
         cp pkg/bin/mosh release_pkg/
         cp pkg/bin/mosh-client release_pkg/
         cp pkg/bin/mosh-server release_pkg/
-        find pkg/lib -maxdepth 1 -type f -name '*.dylib' -exec cp {} release_pkg/ \;
+        find pkg/lib -maxdepth 1 -type f -name '*.dylib' -exec cp {} release_pkg/lib/ \;
         cp pkg/share/man/man1/mosh*.1 release_pkg/man/man1/ || true
         cp COPYING release_pkg/ 2>/dev/null || true
         cp README* release_pkg/ 2>/dev/null || true
 
         for prog in release_pkg/mosh-client release_pkg/mosh-server; do
+          expected_rpaths=$(printf '%s\n' '@executable_path/lib' '@executable_path/../lib' '@executable_path')
+          actual_rpaths=$(otool -l "$prog" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
+          if [ "$actual_rpaths" != "$expected_rpaths" ]; then
+            printf 'Unexpected LC_RPATH entries for %s:\n%s\n' "$prog" "$actual_rpaths" >&2
+            exit 1
+          fi
+
           while IFS= read -r dep; do
-            base=$(basename "$dep")
-            install_name_tool -change "$dep" "@executable_path/${base}" "$prog"
-          done < <(otool -L "$prog" | awk '{print $1}' | grep '^@executable_path/../lib/' || true)
+            case "$dep" in
+              @rpath/*|/System/Library/*|/usr/lib/*)
+                ;;
+              *)
+                printf 'Unexpected dylib ref in %s: %s\n' "$prog" "$dep" >&2
+                exit 1
+                ;;
+            esac
+          done < <(otool -L "$prog" | awk '{print $1}' | tail -n +2)
         done
 
         if which -s codesign; then
@@ -235,11 +247,30 @@ jobs:
         check_targets=(release_pkg/mosh-client release_pkg/mosh-server)
         while IFS= read -r dylib; do
           check_targets+=("$dylib")
-        done < <(find release_pkg -maxdepth 1 -type f -name '*.dylib' -print | sort)
+        done < <(find release_pkg/lib -maxdepth 1 -type f -name '*.dylib' -print | sort)
 
-        unresolved=$(otool -L "${check_targets[@]}" | awk '{print $1}' | grep -E '(^@rpath/|^@executable_path/\.\./lib/|^/opt/homebrew/|^/usr/local/|^/opt/zerobrew/|^/opt/local/)' || true)
+        unresolved=$(otool -L "${check_targets[@]}" | awk '{print $1}' | grep -E '(^/opt/homebrew/|^/usr/local/|^/opt/zerobrew/|^/opt/local/)' || true)
         if [ -n "$unresolved" ]; then
           printf 'Unexpected dylib references detected:\n%s\n' "$unresolved" >&2
+          exit 1
+        fi
+
+        unresolved_loader=""
+        while IFS= read -r dylib; do
+          while IFS= read -r dep; do
+            case "$dep" in
+              @loader_path/*)
+                dep_base=$(basename "$dep")
+                if [ ! -f "$(dirname "$dylib")/${dep_base}" ]; then
+                  unresolved_loader+="$(printf '\n%s: %s' "$dylib" "$dep")"
+                fi
+                ;;
+            esac
+          done < <(otool -L "$dylib" | awk '{print $1}' | tail -n +2)
+        done < <(find release_pkg/lib -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+        if [ -n "$unresolved_loader" ]; then
+          printf 'Broken @loader_path references detected:%s\n' "$unresolved_loader" >&2
           exit 1
         fi
 

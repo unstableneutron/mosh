@@ -266,7 +266,7 @@ resolve_rpath_dep()
     dep="$2"
 
     suffix="${dep#@rpath/}"
-    list_rpaths "$target" | while IFS= read -r rpath
+    while IFS= read -r rpath
     do
         [ -n "$rpath" ] || continue
         expanded_rpath=$(expand_path_tokens "$rpath" "$target")
@@ -275,7 +275,7 @@ resolve_rpath_dep()
             echo "$candidate"
             return 0
         fi
-    done
+    done < <(list_rpaths "$target")
 
     # Fallback for Homebrew-style libs that rely on consumer rpaths.
     dep_base=$(basename "$dep")
